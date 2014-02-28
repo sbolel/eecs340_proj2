@@ -3,6 +3,7 @@ lib-objs +=	arp.o \
 		buffer.o \
 		config.o \
 		constate.o \
+		contimeout.o \
 		debug.o \
 		error.o \
 		ethernet.o \
