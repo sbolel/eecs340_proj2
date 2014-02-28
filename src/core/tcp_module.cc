@@ -10,7 +10,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <deque>
-
+#include <cmath>
 
 #include <iostream>
 
@@ -18,12 +18,18 @@
 #include "tcpstate.h"
 #include "contimeout.h"
 
+using namespace std;
+// using std::cout;
+// using std::endl;
+// using std::cerr;
+// using std::string;
 
+typedef ConnectionList<TCPState> CList;
+typedef ConnectionToStateMapping<TCPState> Mapping;
+CList clist;
+MinetHandle mux;
+MinetHandle sock;
 
-using std::cout;
-using std::endl;
-using std::cerr;
-using std::string;
 
 unsigned int generateISN();
 
@@ -40,9 +46,160 @@ std::deque<ConnectionToRTTMapping>::iterator FindExactMatching(const Connection&
 
 std::deque<ConnectionToRTTMapping>::iterator FindMatching(const Connection& rhs, std::deque<ConnectionToRTTMapping>& rttlist);
 
+int sendUp(Connection& c, srrType type, Buffer data=Buffer(), unsigned error=EOK) {
+  SockRequestResponse s(type,c,data,data.GetSize(),error);
+  cout << "sending packet up\n" << s << endl;
+  return MinetSend(sock, s);
+}
+
+void setTimeout(Mapping& m, double secondsAhead) {
+  m.timeout.SetToCurrentTime();
+  m.timeout.tv_sec += (long)(secondsAhead);
+  const long aMilli = (long) pow(10,6);
+  m.timeout.tv_usec += ( (long)(secondsAhead*aMilli)%aMilli);
+  m.bTmrActive = true;
+}
+
+void clearTimeout(Mapping& m) {
+  m.bTmrActive = false;
+  m.state.tmrTries = 0;
+}
+void kill(Mapping& m) {
+   sendUp(m.connection, WRITE, Buffer(), ECONN_FAILED);
+   m.state.SetState(CLOSED);
+   clearTimeout(m);
+   //clist.erase(clist.FindMatching(m.connection));
+}
+/**
+ *  Create outgoing packet
+ */
+Packet makeFullPacket(Mapping& m, unsigned char flags, unsigned ack, unsigned seq, Buffer buf) {
+  
+  Packet out(buf);
+   
+  Connection & connection = m.connection;
+  unsigned windowSize = m.state.GetN();
+   
+  // Build IP header
+  IPHeader ih;
+   
+  ih.SetProtocol(IP_PROTO_TCP);
+  ih.SetSourceIP(connection.src);
+  ih.SetDestIP(connection.dest);
+  ih.SetTotalLength(IP_HEADER_BASE_LENGTH + TCP_HEADER_BASE_LENGTH + buf.GetSize());
+            
+  out.PushFrontHeader(ih);
+  
+  // Build TCP header
+  TCPHeader th;
+  th.SetFlags(flags, out);
+   
+  th.SetSourcePort(connection.srcport, out);
+  th.SetDestPort(connection.destport, out);
+  th.SetAckNum(ack, out);
+  th.SetSeqNum(seq, out);
+  th.SetHeaderLen(TCP_HEADER_BASE_LENGTH/4, out);
+
+  th.SetWinSize(windowSize, out);
+
+  if(IS_SYN(flags)) {
+    TCPOptions op;
+    op.data[0] = TCP_HEADER_OPTION_KIND_MSS;
+    op.data[1] = TCP_HEADER_OPTION_KIND_MSS_LEN;
+    op.data[2] = 0;
+    op.data[3] = 256;
+    op.data[4] = 1;
+    op.data[5] = 1;
+    op.data[5] = 1;
+    op.data[7] = 0;
+    op.len = 8;
+    th.SetOptions(op);
+  }
+   
+   // Set tcp header BEHIND the IP header
+   out.PushBackHeader(th);
+   return out;
+}
+
+Packet makePacket(Mapping& m, unsigned char flags, Buffer buf=Buffer()) {
+  unsigned ack = m.state.GetLastRecvd();
+  unsigned seq = m.state.GetLastSent();
+  return makeFullPacket(m, flags, ack, seq, buf);
+}
+
+/** 
+ *  TCP-Socket Layer interface
+ */
+void handleSockRequest(SockRequestResponse& s) {
+  cout << s << endl;
+  
+  switch(s.type) {
+      case CONNECT:
+      {
+         cout << "Received CONNECT: active open\n";
+         clist.push_front(Mapping(s.connection,Time(0.0),TCPState(rand(), SYN_SENT, 0),true));
+         Mapping& m = *clist.FindMatching(s.connection);
+         sendUp(m.connection, STATUS);
+         break;
+      }
+      case ACCEPT:
+      {
+         cout << "Received ACCEPT: new connection\n";
+         clist.push_front(Mapping(s.connection,Time(2.0),TCPState(rand(), LISTEN, 0),false));
+         CList::iterator i = clist.FindMatching(s.connection);
+         Mapping& m = *i;
+         m.connection = s.connection;
+         sendUp(m.connection, STATUS);
+         break;
+      }     
+      case WRITE:
+      {
+         Mapping& m = *clist.FindMatching(s.connection);
+         m.state.SendBuffer.AddBack(s.data);
+         sendUp(m.connection, STATUS);
+         setTimeout(m, 0);
+         break;
+      }
+      case FORWARD:
+      {
+         Mapping& m = *clist.FindMatching(s.connection);
+         sendUp(m.connection, STATUS);
+         break;
+      }
+      case CLOSE:
+      {
+         cout << "Received CLOSE" << endl;
+         CList::iterator i = clist.FindMatching(s.connection);
+         if (i == clist.end()) {
+            sendUp(s.connection, STATUS, Buffer(), ECONN_FAILED);   
+         } else {
+            clist.erase(i);
+         }
+         break;
+      }   
+      case STATUS:
+         cout << "Received STATUS" << endl;
+         CList::iterator i = clist.FindMatching(s.connection);
+         Mapping& m = *i;
+         m.connection = s.connection;
+         //sendUp(m.connection, STATUS);
+         
+         if(s.error == 12) {        // closing 
+            cout << " CLOSING \n";
+            unsigned char flags = 0;
+            SET_FIN(flags);  SET_ACK(flags);
+            m.state.SetLastRecvd(m.state.GetLastRecvd() + 1);
+            Packet last = makePacket(m, flags);
+            cout << last << endl;
+            MinetSend(mux, last);
+            m.state.SetState(LAST_ACK);
+         }
+         break;
+   }
+}
+
 int main(int argc, char *argv[])
 {
-  MinetHandle mux, sock;
 
   MinetInit(MINET_TCP_MODULE);
 
@@ -64,7 +221,7 @@ int main(int argc, char *argv[])
   MinetEvent event;
 
   cerr << "Setting up connection list" << endl;
-  ConnectionList<TCPState> clist;
+  // ConnectionList<TCPState> clist;
   std::deque<ConnectionToRTTMapping> rttlist;
 
   //hard code passive OPEN connection
@@ -120,8 +277,10 @@ int main(int argc, char *argv[])
         MinetReceive(mux,p);
 
         unsigned tcphlen=TCPHeader::EstimateTCPHeaderLength(p);
-        cerr << "\nestimated header len="<<tcphlen<<endl;
+        cerr << "\nestimated header len=" << tcphlen << endl;
         p.ExtractHeaderFromPayload<TCPHeader>(tcphlen);
+
+
         IPHeader ipl=p.FindHeader(Headers::IPHeader);
         TCPHeader tcph=p.FindHeader(Headers::TCPHeader);
         unsigned short packet_len;
@@ -298,10 +457,12 @@ int main(int argc, char *argv[])
         }
       }
       //  Data from the Sockets layer above  //
-      if (event.handle==sock) {
+      if (event.handle == sock) {
         SockRequestResponse s;
         MinetReceive(sock,s);
         cerr << "Received Socket Request:" << s << endl;
+        // HANDLE SOCK REQUEST
+        // handleSockRequest(s);
       }
     }
   }
@@ -349,6 +510,7 @@ void send_packet (MinetHandle& h, Packet& p)
 {
   MinetSend(h, p);
 }
+
 
 template<class STATE>
 typename ConnectionList<STATE>::iterator FindExactMatching(const Connection& rhs, ConnectionList<STATE>& clist)
