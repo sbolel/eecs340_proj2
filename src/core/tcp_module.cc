@@ -26,25 +26,58 @@ using namespace std;
 
 typedef ConnectionList<TCPState> CList;
 typedef ConnectionToStateMapping<TCPState> Mapping;
+
 CList clist;
 MinetHandle mux;
 MinetHandle sock;
 
-
-unsigned int generateISN();
-
-void printPacket(Packet& p);
-
-void send_packet (MinetHandle& h, Packet& p);
-
-void send_syn(MinetHandle& h, ConnectionToStateMapping<TCPState>& c, ConnectionToRTTMapping& r);
-
-template<class STATE> 
+template<class STATE>
 typename ConnectionList<STATE>::iterator FindExactMatching(const Connection& rhs, ConnectionList<STATE>& clist);
 
 std::deque<ConnectionToRTTMapping>::iterator FindExactMatching(const Connection& rhs, std::deque<ConnectionToRTTMapping>& rttlist);
 
 std::deque<ConnectionToRTTMapping>::iterator FindMatching(const Connection& rhs, std::deque<ConnectionToRTTMapping>& rttlist);
+
+IPHeader& getIPHeader(Packet& p) {
+   return (IPHeader&) p.FindHeader(Headers::IPHeader);
+}
+
+TCPHeader& getTCPHeader(Packet& p) { 
+   return (TCPHeader&) p.FindHeader(Headers::TCPHeader);
+}
+
+unsigned int generateISN() {
+  return 5000;
+}
+
+void printPacket(Packet& p) {
+  IPHeader ipl = getIPHeader(p);
+  TCPHeader tcph = getTCPHeader(p);
+  unsigned short packet_len;
+  unsigned char ip_header_len;
+  unsigned char tcphlen;
+  ipl.GetTotalLength(packet_len);
+  ipl.GetHeaderLength(ip_header_len);
+  tcph.GetHeaderLen(tcphlen);
+  ip_header_len *= 4;
+  tcphlen *= 4;
+  size_t data_len = packet_len - (unsigned)ip_header_len - (unsigned)tcphlen;
+
+  cerr << " =============== PACKET =============== " << endl;
+  cerr << "IP Header = " << ipl << " and " << endl;
+  cerr << "TCP Header = " << tcph << " and " << endl;
+  cerr << "Checksum = " << (tcph.IsCorrectChecksum(p) ? "VALID" : "INVALID")<< endl;
+  cerr << "Packet length = " << packet_len << endl;
+  cerr << "IP Header length = " << (unsigned)ip_header_len << endl;
+  Buffer& data = p.GetPayload();
+  cerr << "App Data length = " << data_len << endl;
+  cerr << "App Data = " << data.ExtractFront(data_len) << endl;
+  cerr << " ============== / PACKET ============== " << endl;
+}
+
+void sendPacket (MinetHandle& h, Packet& p) {
+  MinetSend(h, p);
+}
 
 int sendUp(Connection& c, srrType type, Buffer data=Buffer(), unsigned error=EOK) {
   SockRequestResponse s(type,c,data,data.GetSize(),error);
@@ -52,11 +85,51 @@ int sendUp(Connection& c, srrType type, Buffer data=Buffer(), unsigned error=EOK
   return MinetSend(sock, s);
 }
 
+void sendSyn(MinetHandle& h, ConnectionToStateMapping<TCPState>& c, ConnectionToRTTMapping& r) {
+  cerr << " ============== SYN ============== " << endl;
+  Packet syn;
+  IPHeader ih;
+  TCPHeader th;
+  unsigned int p_seq_num;
+  unsigned char new_flags = 0;
+
+  ih.SetProtocol(IP_PROTO_TCP);
+  ih.SetSourceIP(c.connection.src);
+  ih.SetDestIP(c.connection.dest);
+  ih.SetTotalLength(IP_HEADER_BASE_LENGTH + TCP_HEADER_BASE_LENGTH);
+  syn.PushFrontHeader(ih);
+
+  cerr << "IP Header: " << ih << endl;
+
+  th.SetSourcePort(c.connection.srcport, syn);
+  th.SetDestPort(c.connection.destport, syn);
+  th.SetSeqNum(c.state.GetLastSent(), syn);
+  th.SetAckNum(0, syn);
+  th.SetHeaderLen(TCP_HEADER_BASE_LENGTH/4, syn);
+  th.SetWinSize(c.state.TCP_BUFFER_SIZE, syn);
+  SET_SYN(new_flags);
+  th.SetFlags(new_flags, syn);
+  syn.PushBackHeader(th);
+
+  cerr << "TCP Header: " << th << endl;
+  cerr << "Sending SYN" << endl;
+  printPacket(syn);
+  r.seq_num = c.state.GetLastSent();
+  r.time_sent.SetToCurrentTime();
+  c.timeout = 1;
+  c.bTmrActive = true;
+  sendPacket(h, syn);
+  c.state.stateOfcnx = SYN_SENT;
+  cerr << "State info: " << c << endl;
+  cerr << "RTT Measure info: " << r << endl;
+  cerr << " ============= / SYN ============= " << endl;
+}
+
 void setTimeout(Mapping& m, double secondsAhead) {
   m.timeout.SetToCurrentTime();
   m.timeout.tv_sec += (long)(secondsAhead);
   const long aMilli = (long) pow(10,6);
-  m.timeout.tv_usec += ( (long)(secondsAhead*aMilli)%aMilli);
+  m.timeout.tv_usec += ((long)(secondsAhead*aMilli)%aMilli);
   m.bTmrActive = true;
 }
 
@@ -64,30 +137,30 @@ void clearTimeout(Mapping& m) {
   m.bTmrActive = false;
   m.state.tmrTries = 0;
 }
+
 void kill(Mapping& m) {
-   sendUp(m.connection, WRITE, Buffer(), ECONN_FAILED);
-   m.state.SetState(CLOSED);
-   clearTimeout(m);
-   //clist.erase(clist.FindMatching(m.connection));
+  sendUp(m.connection, WRITE, Buffer(), ECONN_FAILED);
+  m.state.SetState(CLOSED);
+  clearTimeout(m);
+  //clist.erase(clist.FindMatching(m.connection));
 }
+
 /**
  *  Create outgoing packet
  */
 Packet makeFullPacket(Mapping& m, unsigned char flags, unsigned ack, unsigned seq, Buffer buf) {
   
   Packet out(buf);
-   
   Connection & connection = m.connection;
   unsigned windowSize = m.state.GetN();
    
   // Build IP header
   IPHeader ih;
-   
   ih.SetProtocol(IP_PROTO_TCP);
   ih.SetSourceIP(connection.src);
   ih.SetDestIP(connection.dest);
   ih.SetTotalLength(IP_HEADER_BASE_LENGTH + TCP_HEADER_BASE_LENGTH + buf.GetSize());
-            
+
   out.PushFrontHeader(ih);
   
   // Build TCP header
@@ -99,26 +172,11 @@ Packet makeFullPacket(Mapping& m, unsigned char flags, unsigned ack, unsigned se
   th.SetAckNum(ack, out);
   th.SetSeqNum(seq, out);
   th.SetHeaderLen(TCP_HEADER_BASE_LENGTH/4, out);
-
   th.SetWinSize(windowSize, out);
-
-  if(IS_SYN(flags)) {
-    TCPOptions op;
-    op.data[0] = TCP_HEADER_OPTION_KIND_MSS;
-    op.data[1] = TCP_HEADER_OPTION_KIND_MSS_LEN;
-    op.data[2] = 0;
-    op.data[3] = 256;
-    op.data[4] = 1;
-    op.data[5] = 1;
-    op.data[5] = 1;
-    op.data[7] = 0;
-    op.len = 8;
-    th.SetOptions(op);
-  }
    
-   // Set tcp header BEHIND the IP header
-   out.PushBackHeader(th);
-   return out;
+  // Set tcp header BEHIND the IP header
+  out.PushBackHeader(th);
+  return out;
 }
 
 Packet makePacket(Mapping& m, unsigned char flags, Buffer buf=Buffer()) {
@@ -131,71 +189,72 @@ Packet makePacket(Mapping& m, unsigned char flags, Buffer buf=Buffer()) {
  *  TCP-Socket Layer interface
  */
 void handleSockRequest(SockRequestResponse& s) {
-  cout << s << endl;
-  
+  cerr << s << endl;
   switch(s.type) {
-      case CONNECT:
-      {
-         cout << "Received CONNECT: active open\n";
-         clist.push_front(Mapping(s.connection,Time(0.0),TCPState(rand(), SYN_SENT, 0),true));
-         Mapping& m = *clist.FindMatching(s.connection);
-         sendUp(m.connection, STATUS);
-         break;
-      }
-      case ACCEPT:
-      {
-         cout << "Received ACCEPT: new connection\n";
-         clist.push_front(Mapping(s.connection,Time(2.0),TCPState(rand(), LISTEN, 0),false));
-         CList::iterator i = clist.FindMatching(s.connection);
-         Mapping& m = *i;
-         m.connection = s.connection;
-         sendUp(m.connection, STATUS);
-         break;
-      }     
-      case WRITE:
-      {
-         Mapping& m = *clist.FindMatching(s.connection);
-         m.state.SendBuffer.AddBack(s.data);
-         sendUp(m.connection, STATUS);
-         setTimeout(m, 0);
-         break;
-      }
-      case FORWARD:
-      {
-         Mapping& m = *clist.FindMatching(s.connection);
-         sendUp(m.connection, STATUS);
-         break;
-      }
-      case CLOSE:
-      {
-         cout << "Received CLOSE" << endl;
-         CList::iterator i = clist.FindMatching(s.connection);
-         if (i == clist.end()) {
-            sendUp(s.connection, STATUS, Buffer(), ECONN_FAILED);   
-         } else {
-            clist.erase(i);
-         }
-         break;
-      }   
-      case STATUS:
-         cout << "Received STATUS" << endl;
-         CList::iterator i = clist.FindMatching(s.connection);
-         Mapping& m = *i;
-         m.connection = s.connection;
-         //sendUp(m.connection, STATUS);
-         
-         if(s.error == 12) {        // closing 
-            cout << " CLOSING \n";
-            unsigned char flags = 0;
-            SET_FIN(flags);  SET_ACK(flags);
-            m.state.SetLastRecvd(m.state.GetLastRecvd() + 1);
-            Packet last = makePacket(m, flags);
-            cout << last << endl;
-            MinetSend(mux, last);
-            m.state.SetState(LAST_ACK);
-         }
-         break;
-   }
+    case CONNECT:
+    {
+       cerr << "Received CONNECT: active open\n";
+       clist.push_front(Mapping(s.connection,Time(0.0),TCPState(rand(), SYN_SENT, 0),true));
+       Mapping& m = *clist.FindMatching(s.connection);
+       sendUp(m.connection, STATUS);
+       break;
+    }
+    case ACCEPT:
+    {
+       cerr << "Received ACCEPT: new connection\n";
+       clist.push_front(Mapping(s.connection,Time(2.0),TCPState(rand(), LISTEN, 0),false));
+       CList::iterator i = clist.FindMatching(s.connection);
+       Mapping& m = *i;
+       m.connection = s.connection;
+       sendUp(m.connection, STATUS);
+       break;
+    }     
+    case WRITE:
+    {
+       Mapping& m = *clist.FindMatching(s.connection);
+       m.state.SendBuffer.AddBack(s.data);
+       sendUp(m.connection, STATUS);
+       setTimeout(m, 0);
+       break;
+    }
+    case FORWARD:
+    {
+       Mapping& m = *clist.FindMatching(s.connection);
+       sendUp(m.connection, STATUS);
+       break;
+    }
+    case CLOSE:
+    {
+       cerr << "Received CLOSE" << endl;
+       CList::iterator i = clist.FindMatching(s.connection);
+       if (i == clist.end()) {
+          sendUp(s.connection, STATUS, Buffer(), ECONN_FAILED);   
+       } else {
+          clist.erase(i);
+       }
+       break;
+    }   
+    case STATUS:
+    {
+       cerr << "Received STATUS" << endl;
+       CList::iterator i = clist.FindMatching(s.connection);
+       Mapping& m = *i;
+       m.connection = s.connection;
+       //sendUp(m.connection, STATUS);
+       
+       if(s.error == 12) {        // closing 
+          cerr << " CLOSING \n";
+          unsigned char flags = 0;
+          SET_FIN(flags);  SET_ACK(flags);
+          m.state.SetLastRecvd(m.state.GetLastRecvd() + 1);
+          Packet last = makePacket(m, flags);
+          cerr << last << endl;
+          MinetSend(mux, last);
+          m.state.SetState(LAST_ACK);
+       }
+       break;
+    }
+  }
 }
 
 int main(int argc, char *argv[])
@@ -261,9 +320,9 @@ int main(int argc, char *argv[])
   ConnectionList<TCPState>::iterator tempcs = FindExactMatching(active_open, clist);
   std::deque<ConnectionToRTTMapping>::iterator temprs = FindExactMatching(active_open, rttlist);
 
-  send_syn(mux, (*tempcs), (*temprs));
-  send_syn(mux, (*tempcs), (*temprs));
-  send_syn(mux, (*tempcs), (*temprs));
+  sendSyn(mux, (*tempcs), (*temprs));
+  sendSyn(mux, (*tempcs), (*temprs));
+  sendSyn(mux, (*tempcs), (*temprs));
 
   while (MinetGetNextEvent(event)==0) {
     // if we received an unexpected type of event, print error
@@ -357,7 +416,7 @@ int main(int argc, char *argv[])
                 rs->time_sent.SetToCurrentTime();
                 cs->timeout = 1;
                 cs->bTmrActive = true;
-                send_packet(mux, syn_ack);
+                sendPacket(mux, syn_ack);
 
                 cs->state.SetState(SYN_RCVD);
                 cerr << "State info: " << (*cs) << endl;
@@ -417,7 +476,7 @@ int main(int argc, char *argv[])
                     rs->time_sent.SetToCurrentTime();
                     cs->timeout = 1;
                     cs->bTmrActive = true;
-                    send_packet(mux, ackp);
+                    sendPacket(mux, ackp);
 
                     cs->state.SetState(ESTABLISHED);
                     cerr << "State info: " << (*cs) << endl;
@@ -462,55 +521,13 @@ int main(int argc, char *argv[])
         MinetReceive(sock,s);
         cerr << "Received Socket Request:" << s << endl;
         // HANDLE SOCK REQUEST
-        // handleSockRequest(s);
+        handleSockRequest(s);
       }
     }
   }
   cerr << "Reached end of main" << endl;
   return 0;
 }
-
-unsigned int generateISN()
-{
-  return 5000;
-}
-
-void printPacket(Packet& p)
-{
-  
-  IPHeader ipl=p.FindHeader(Headers::IPHeader);
-  TCPHeader tcph=p.FindHeader(Headers::TCPHeader);
-  
-  unsigned short packet_len;
-  unsigned char ip_header_len;
-  unsigned char tcphlen;
-  ipl.GetTotalLength(packet_len);
-  ipl.GetHeaderLength(ip_header_len);
-  tcph.GetHeaderLen(tcphlen);
-  ip_header_len *= 4;
-  tcphlen *= 4;
-  size_t data_len = packet_len - (unsigned)ip_header_len - (unsigned)tcphlen;
-
-  cerr << "TCP Packet: IP Header is "<<ipl<<" and "<<endl;
-  cerr << "TCP Header is "<<tcph << " and "<<endl;
-
-  cerr << "Checksum is " << (tcph.IsCorrectChecksum(p) ? "VALID" : "INVALID")<<endl;
-
-  cerr << "Packet length: " << packet_len << endl;
-  cerr << "IP Header length: " << (unsigned)ip_header_len << endl;
-  cerr << "App data length: " << data_len << endl;
-  Buffer& data = p.GetPayload();
-  cerr << "Application data size: " << data_len << endl;
-  cerr << "Application data: " << data.ExtractFront(data_len) << endl;
-
-  
-}
-
-void send_packet (MinetHandle& h, Packet& p)
-{
-  MinetSend(h, p);
-}
-
 
 template<class STATE>
 typename ConnectionList<STATE>::iterator FindExactMatching(const Connection& rhs, ConnectionList<STATE>& clist)
@@ -545,44 +562,4 @@ std::deque<ConnectionToRTTMapping>::iterator FindMatching(const Connection& rhs,
     }
   }
   return rttlist.end();
-}
-
-void send_syn(MinetHandle& h, ConnectionToStateMapping<TCPState>& c, ConnectionToRTTMapping& r)
-{
-  cerr << "Making SYN packet" << endl;
-  Packet syn;
-  IPHeader ih;
-  TCPHeader th;
-  unsigned int p_seq_num;
-  unsigned char new_flags = 0;
-
-  ih.SetProtocol(IP_PROTO_TCP);
-  ih.SetSourceIP(c.connection.src);
-  ih.SetDestIP(c.connection.dest);
-  ih.SetTotalLength(IP_HEADER_BASE_LENGTH + TCP_HEADER_BASE_LENGTH);
-  syn.PushFrontHeader(ih);
-
-  cerr << "IP Header: " << ih << endl;
-
-  th.SetSourcePort(c.connection.srcport, syn);
-  th.SetDestPort(c.connection.destport, syn);
-  th.SetSeqNum(c.state.GetLastSent(), syn);
-  th.SetAckNum(0, syn);
-  th.SetHeaderLen(TCP_HEADER_BASE_LENGTH/4, syn);
-  th.SetWinSize(c.state.TCP_BUFFER_SIZE, syn);
-  SET_SYN(new_flags);
-  th.SetFlags(new_flags, syn);
-  syn.PushBackHeader(th);
-
-  cerr << "TCP Header: " << th << endl;
-  cerr << "Sending SYN" << endl;
-  printPacket(syn);
-  r.seq_num = c.state.GetLastSent();
-  r.time_sent.SetToCurrentTime();
-  c.timeout = 1;
-  c.bTmrActive = true;
-  send_packet(h, syn);
-  c.state.stateOfcnx = SYN_SENT;
-  cerr << "State info: " << c << endl;
-  cerr << "RTT Measure info: " << r << endl;
 }
