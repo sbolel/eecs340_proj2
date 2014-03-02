@@ -1,30 +1,7 @@
 #include "contimeout.h"
 
-ConnectionToRTTMapping::ConnectionToRTTMapping() : connection(), estimatedRTT(0), devRTT(-1), seq_num(0), time_sent(0)
-{
 
-}
-ConnectionToRTTMapping::ConnectionToRTTMapping(const Connection& c) : connection(c), estimatedRTT(0), devRTT(-1), seq_num(0), time_sent(0)
-{
-
-}
-ConnectionToRTTMapping::ConnectionToRTTMapping(const ConnectionToRTTMapping& rhs) : connection(rhs.connection), estimatedRTT(rhs.estimatedRTT), devRTT(rhs.devRTT), seq_num(rhs.seq_num), time_sent(rhs.time_sent)
-{
-
-}
-
-ConnectionToRTTMapping& ConnectionToRTTMapping::operator=(const ConnectionToRTTMapping& rhs)
-{
-	connection = rhs.connection;
-	estimatedRTT = rhs.estimatedRTT;
-	devRTT = rhs.devRTT;
-	seq_num = rhs.seq_num;
-	time_sent = rhs.time_sent;
-
-	return *this;
-}
-
-void ConnectionToRTTMapping::computeEstimatedRTT(const Time& sampleRTT)
+void Mapping::computeEstimatedRTT(const Time& sampleRTT)
 {
 	if((double)estimatedRTT == 0){
 		estimatedRTT = sampleRTT;
@@ -33,7 +10,7 @@ void ConnectionToRTTMapping::computeEstimatedRTT(const Time& sampleRTT)
 	}
 }
 
-void ConnectionToRTTMapping::computeDev(const Time& sampleRTT)
+void Mapping::computeDev(const Time& sampleRTT)
 {
 	if(devRTT == -1){
 		devRTT = ((double)sampleRTT) / 2;
@@ -45,11 +22,17 @@ void ConnectionToRTTMapping::computeDev(const Time& sampleRTT)
 	}
 }
 
-double ConnectionToRTTMapping::computeTimeout(const Time& sampleRTT)
+void Mapping::computeTimeout()
 {
-	double timeout;
+	if(devRTT < 0){
+		timeout_interval = 1;
+	} else {
+		timeout_interval = (double)estimatedRTT + 4*devRTT;
+	}
+}
+
+void Mapping::updateEstimatedRTT(const Time& sampleRTT)
+{
 	computeEstimatedRTT(sampleRTT);
 	computeDev(sampleRTT);
-	timeout = estimatedRTT + 4*devRTT;
-	return timeout;
 }
