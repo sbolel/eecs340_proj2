@@ -252,7 +252,7 @@ int main(int argc, char *argv[])
                     Buffer data;
                     //get data from send_buffer
                     newp = makeFullPacket(*cs, new_flags, cs->state.GetLastRecvd()+1, cs->state.GetLastSent(), data);
-                    cs->state.SetLastSent(cs->state.GetLastSent()+data.GetSize());
+                    cs->state.SetLastSent(cs->state.GetLastSent()+data.GetSize()+1);
                     printPacket(newp);
                     //cs->retransmit_queue.push_back(newp);
                     MinetSend(mux, newp);
@@ -276,38 +276,66 @@ int main(int argc, char *argv[])
             break;
             case ESTABLISHED:
             {
+              
               cerr << "Connection in ESTABLISHED state" << endl;
-              bool data_ok = (*cs).state.SetLastRecvd(seqnum,data_len); //check and set last_received
+
               unsigned char flags;
-              tcph.GetFlags(flags);
               unsigned int p_ack_num;
               unsigned int p_seq_num;
-
-              if (IS_ACK(flags)) {
-                cs->state.SetLastAcked(p_ack_num); //accumulative ack, so anything before acknum should be acked already
-              }
-              if (IS_FIN(flags)) {
-                cs->state.SetLastRecvd(p_ack_num); //no more data
-                cs->state.SetState(CLOSE_WAIT); //change state into CLOSE_WAIT
-              } 
-              
+              unsigned short p_win_size;
+              tcph.GetFlags(flags);
               unsigned char new_flags = 0;
-              SET_ACK(new_flags);
-              
-              Packet newp;
-              // HERE
-              // ======
-              newp = makeFullPacket(*cs, new_flags, cs->state.GetLastRecvd()+1, cs->state.GetLastSent(), data);
-              MinetSend(mux, newp);
+              Buffer data = p.GetPayload();
+              tcph.GetSeqNum(p_seq_num);
+              if(p_seq_num == cs->state.GetLastRecvd()+1){
+                if(IS_SYN(flags)){
+                  cerr << "Error: Received SYN in connection state ESTABLISHED" << endl;
+                } else if(IS_ACK(flags)){
+                  tcph.GetAckNum(p_ack_num);
+                  if(p_ack_num > cs->state.GetLastAcked()+1 && p_ack_num <= cs->state.GetLastSent()){
+                    cerr << "Valid ACK" << endl;
+                    Packet newp;
+                    popRetransmitQueue(*cs, p_ack_num);
+                    cs->state.SetLastAcked(p_ack_num-1);
+                    tcph.GetWinSize(p_win_size);
+                    cs->state.SetSendRwnd(p_win_size);
+                    //process data payload in packet
+                    
+                    Buffer return_data;
+                    cs->state.SetLastRecvd(p_seq_num+data.GetSize());
+                    if(data.GetSize()>0){
+                      SET_ACK(new_flags);
+                      //send data to sock
+                      //get some data from our send buffer
+                    }
+                    if(IS_FIN(flags)){
+                      SET_ACK(new_flags);
+                      cs->state.SetState(CLOSE_WAIT);
+                    }
+                    if(new_flags!=0 || return_data.GetSize()>0){
+                      SET_ACK(new_flags); //whatever, don't question this, i dunno
+                      newp=makeFullPacket(*cs, new_flags, cs->state.GetLastRecvd()+1, cs->state.GetLastSent(), return_data);
+                      cs->state.SetLastSent(cs->state.GetLastSent()+return_data.GetSize());
+                      printPacket(newp);
+                      if(IS_FIN(flags) || return_data.GetSize()>0){
+                        //start timer, we have data that got sent or a FIN sent
+                        cs->retransmit_queue.push_back(newp);
+                        startTimer(*cs);
 
-              SockRequestResponse repl;
-              //send packet to socket
-              repl.type = WRITE;
-              repl.connection = c;
-              repl.error = EOK;
-              // repl.bytes = data_len;
-              // repl.data = data;
-              // MinetSend(sock,repl);
+                      }
+                    }
+                  } else if(p_ack_num > cs->state.GetLastSent()){
+                    cerr << "Received ACK for unsent sequece number" << endl;
+
+                  } else if(p_ack_num <= cs->state.GetLastAcked()+1){
+                    cerr << "Received duplicate ACK" << endl;
+                  }
+                } else {
+                  cerr << "Segment received with no ACK" << endl;
+                }
+              } else {
+                cerr << "Invalid sequence number" << endl;
+              }
             }
             break;
             case SEND_DATA:
