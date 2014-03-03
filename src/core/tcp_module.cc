@@ -188,6 +188,7 @@ int main(int argc, char *argv[])
                 cerr << "Sending response to SYN" << endl;
                 cs->state.SetLastSent(cs->state.GetLastSent()+1);
                 printPacket(newp);
+                cs->retransmit_queue.push_back(newp);
                 startTimer(*cs);
                 cs->state.SetState(SYN_RCVD);
                 cerr << "State info: " << (*cs) << endl;
