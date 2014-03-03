@@ -326,7 +326,7 @@ int main(int argc, char *argv[])
                     if(new_flags!=0 || return_data.GetSize()>0){
                       SET_ACK(new_flags); //whatever, don't question this, i dunno
                       newp=makeFullPacket(*cs, new_flags, cs->state.GetLastRecvd()+1, cs->state.GetLastSent(), return_data);
-                      cs->state.SetLastSent(cs->state.GetLastSent()+return_data.GetSize()+IS_FIN(flags));
+                      cs->state.SetLastSent(cs->state.GetLastSent()+(return_data.GetSize() || IS_FIN(flags)));
                       printPacket(newp);
                       if(IS_FIN(flags) || return_data.GetSize()>0){
                         //start timer, we have data that got sent or a FIN sent
@@ -437,10 +437,12 @@ void handleSockRequest(SockRequestResponse& s) {
        Mapping& m = *clist.FindExactMatching(s.connection);
        m.state.SendBuffer.AddBack(s.data);
        Buffer return_data = m.state.SendBuffer.ExtractFront(TCP_MAXIMUM_SEGMENT_SIZE);
+       cerr << "Data size: " << return_data.GetSize() << endl;
+       cerr << "Data: " << return_data << endl;
        unsigned char new_flags;
        SET_ACK(new_flags);
        Packet newp=makeFullPacket(m, new_flags, m.state.GetLastRecvd()+1, m.state.GetLastSent(), return_data);
-       m.state.SetLastSent(m.state.GetLastSent()+return_data.GetSize()+1);
+       m.state.SetLastSent(m.state.GetLastSent()+return_data.GetSize());
        printPacket(newp);
        m.retransmit_queue.push_back(newp);
        startTimer(m);
