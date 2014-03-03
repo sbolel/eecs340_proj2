@@ -3,14 +3,10 @@ Project 2 README
 Kevin Ye
 Sinan Bolel
 
-:::TCP features:::
+--- TCP features ---
 
-Three-way handshake is implemented and passive and active opens are supported.
+Three-way handshake is implemented and passive and active opens are supported. Received packets in established state are relayed to the server from the client.
 
-Receiving: 
+Go-back-N doesnt work.
 
-Go-back-N: 
-
-Closing: 
-
-Testing: Testing with netcat and tcp_client can establish and close connections.
+Testing: Testing with netcat and tcp_client can establish connections, relay messages, but close connections has problems after going into closing state.

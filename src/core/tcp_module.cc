@@ -49,35 +49,6 @@ void popRetransmitQueue(Mapping& m, unsigned int ack_num);
 
 void startTimer(Mapping& m);
 
-
-int extractPayload(Mapping& m, Packet& p) {
-   Buffer& buf = p.GetPayload();
-
-   //char data[2000];
-   unsigned start = 0;
-   for(unsigned i = 0; i < buf.GetSize() && buf[i] == 0; ++i)
-      start = i+1;
-   
-   unsigned length = buf.GetSize() - start;
-   for(unsigned i = start+length; i > start && buf[i-1] == 0; --i)
-      length--;
-   
-   Buffer & data = buf.Extract(start, length); /////   [!] this is destructive, don't do this
-   m.state.RecvBuffer.AddFront(data);
-   
-   
-   cout << "Extracting " << length << " characters: " << data << endl;
-   //[!] send buffer upstairs ... somehow
-   if (length > 0)
-      sendUp(m.connection, WRITE, data); 
-   
-   m.state.SetLastRecvd(m.state.GetLastRecvd() + length); //there is an alt function that returns a bool if it successfully added the datat to the buffer
-   
-   return length;
-}
-
-
-
 int main(int argc, char *argv[])
 {
   srand( time(NULL) );
@@ -326,8 +297,8 @@ int main(int argc, char *argv[])
               Packet newp;
               // HERE
               // ======
-              // newp = makeFullPacket(*cs, new_flags, cs->state.GetLastRecvd()+1, cs->state.GetLastSent(), data);
-              // MinetSend(mux, newp);
+              newp = makeFullPacket(*cs, new_flags, cs->state.GetLastRecvd()+1, cs->state.GetLastSent(), data);
+              MinetSend(mux, newp);
 
               SockRequestResponse repl;
               //send packet to socket
