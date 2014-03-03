@@ -47,6 +47,8 @@ void printPacket(Packet& p);
 
 void popRetransmitQueue(Mapping& m, unsigned int ack_num);
 
+void startTimer(Mapping& m);
+
 int main(int argc, char *argv[])
 {
   srand( time(NULL) );
@@ -74,6 +76,7 @@ int main(int argc, char *argv[])
   unsigned char stop;
   unsigned int breakpt=0;
 
+/*
   Connection passive_open;
   passive_open.src = MyIPAddr;
   passive_open.dest = IP_ADDRESS_ANY;
@@ -98,13 +101,15 @@ int main(int argc, char *argv[])
 
   clist.push_back(passive_open_mapping);
   clist.push_back(active_open_mapping);
+  */
 
-  CList::iterator tempcs = clist.FindExactMatching(active_open);
+  //CList::iterator tempcs = clist.FindExactMatching(active_open);
   CList::iterator earliest;
 
   
-
+/*
   sendSyn(mux, (*tempcs));
+  */
 
   loop_timeout = -1;
   while (MinetGetNextEvent(event, loop_timeout)==0) {
@@ -183,8 +188,7 @@ int main(int argc, char *argv[])
                 cerr << "Sending response to SYN" << endl;
                 cs->state.SetLastSent(cs->state.GetLastSent()+1);
                 printPacket(newp);
-                cs->computeTimeout();
-                setTimeout(*cs, cs->timeout_interval);
+                startTimer(*cs);
                 cs->state.SetState(SYN_RCVD);
                 cerr << "State info: " << (*cs) << endl;
                 MinetSend(mux, newp);
@@ -252,8 +256,7 @@ int main(int argc, char *argv[])
                     //cs->retransmit_queue.push_back(newp);
                     MinetSend(mux, newp);
                     if(data.GetSize()>0){
-                      cs->computeTimeout();
-                      setTimeout(*cs, cs->timeout_interval);
+                      startTimer(*cs);
                     }
                     cerr << "State info: " << (*cs) << endl;
                   } else {
@@ -301,6 +304,7 @@ int main(int argc, char *argv[])
       	SockRequestResponse s;
       	MinetReceive(sock,s);
       	cerr << "Received Socket Request:" << s << endl;
+        handleSockRequest(s);
       }
     }
     now.SetToCurrentTime();
@@ -339,16 +343,17 @@ void handleSockRequest(SockRequestResponse& s) {
     case CONNECT:
     {
        cerr << "Received CONNECT: active open\n";
-       clist.push_front(Mapping(s.connection,Time(0.0),TCPState(rand(), SYN_SENT, 0),true));
-       Mapping& m = *clist.FindMatching(s.connection);
+       clist.push_front(Mapping(s.connection,Time(0.0),TCPState(rand(), SYN_SENT, 0),false));
+       Mapping& m = *clist.FindExactMatching(s.connection);
        sendUp(m.connection, STATUS);
+       sendSyn(mux, m);
        break;
     }
     case ACCEPT:
     {
        cerr << "Received ACCEPT: new connection\n";
        clist.push_front(Mapping(s.connection,Time(2.0),TCPState(rand(), LISTEN, 0),false));
-       CList::iterator i = clist.FindMatching(s.connection);
+       CList::iterator i = clist.FindExactMatching(s.connection);
        Mapping& m = *i;
        m.connection = s.connection;
        sendUp(m.connection, STATUS);
@@ -420,6 +425,12 @@ void clearTimeout(Mapping& m)
 
 }
 
+void startTimer(Mapping& m)
+{
+  m.computeTimeout();
+  setTimeout(m, m.timeout_interval);
+}
+
 Packet makeFullPacket(Mapping& m, unsigned char flags, unsigned ack, unsigned seq, Buffer buf) {
   Packet out(buf);
   Connection & connection = m.connection;
@@ -486,8 +497,7 @@ void sendSyn(MinetHandle& h, Mapping& m)
   printPacket(syn);
   //sendRTTProbe(m);
   m.state.SetLastSent(m.state.GetLastSent()+1);
-  m.computeTimeout();
-  setTimeout(m, m.timeout_interval);
+  startTimer(m);
   m.retransmit_queue.push_back(syn);
   MinetSend(h, syn);
   m.state.SetState(SYN_SENT);
