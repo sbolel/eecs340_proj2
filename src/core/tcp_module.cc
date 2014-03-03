@@ -225,7 +225,6 @@ int main(int argc, char *argv[])
               } else {
                 cerr << "Invalid packet sequence number" << endl;
               }
-
             }
             break;
             case SYN_SENT:
@@ -380,7 +379,15 @@ void handleSockRequest(SockRequestResponse& s) {
        cerr << "Received CLOSE" << endl;
        CList::iterator i = clist.FindMatching(s.connection);
        if (i == clist.end()) {
-          sendUp(s.connection, STATUS, Buffer(), ECONN_FAILED);   
+          cerr << " CLOSING \n";
+          unsigned char flags = 0;
+          SET_FIN(flags);  SET_ACK(flags);
+          Mapping& m = *i;
+          m.state.SetLastRecvd(m.state.GetLastRecvd() + 1);
+          Packet last = makeFullPacket(m, flags, m.state.GetLastRecvd(), m.state.GetLastSent(), Buffer());
+          cerr << last << endl;
+          MinetSend(mux, last);
+          m.state.SetState(LAST_ACK);
        } else {
           clist.erase(i);
        }
@@ -389,23 +396,12 @@ void handleSockRequest(SockRequestResponse& s) {
     case STATUS:
     {
        cerr << "Received STATUS" << endl;
-       CList::iterator i = clist.FindMatching(s.connection);
-       Mapping& m = *i;
-       m.connection = s.connection;
+       // CList::iterator i = clist.FindMatching(s.connection);
+       // Mapping& m = *i;
+       // m.connection = s.connection;
        //sendUp(m.connection, STATUS);
-       
-       if(s.error == 12) {        // closing 
-          cerr << " CLOSING \n";
-          unsigned char flags = 0;
-          SET_FIN(flags);  SET_ACK(flags);
-          m.state.SetLastRecvd(m.state.GetLastRecvd() + 1);
-          Packet last = makeFullPacket(m, flags, m.state.GetLastRecvd(), m.state.GetLastSent(), Buffer());
-          cerr << last << endl;
-          MinetSend(mux, last);
-          m.state.SetState(LAST_ACK);
-       }
-       break;
-    }
+     break;
+     }
   }
 }
 
