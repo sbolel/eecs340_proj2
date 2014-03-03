@@ -214,6 +214,7 @@ int main(int argc, char *argv[])
                     cs->state.SetLastRecvd(p_seq_num);
                     cs->state.SetLastAcked(p_ack_num-1);
                     cs->state.SetState(ESTABLISHED);
+                    sendUp(cs->connection, WRITE);
                     //maybe process data here
                   } else {
                     cerr << "Unacceptable ACK num" << endl;
@@ -255,6 +256,7 @@ int main(int argc, char *argv[])
                     printPacket(newp);
                     //cs->retransmit_queue.push_back(newp);
                     MinetSend(mux, newp);
+                    sendUp(cs->connection, WRITE);
                     if(data.GetSize()>0){
                       startTimer(*cs);
                     }
