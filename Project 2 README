@@ -1,0 +1,16 @@
+Project 2 README
+
+Kevin Ye
+Sinan Bolel
+
+:::TCP features:::
+
+Three-way handshake is implemented and passive and active opens are supported.
+
+Receiving: 
+
+Go-back-N: 
+
+Closing: 
+
+Testing: Testing with netcat and tcp_client can establish and close connections.
