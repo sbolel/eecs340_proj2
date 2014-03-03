@@ -45,6 +45,8 @@ void sendSyn(MinetHandle& h, Mapping& m);
 
 void printPacket(Packet& p);
 
+size_t getDataLength(Packet& p);
+
 void popRetransmitQueue(Mapping& m, unsigned int ack_num);
 
 void startTimer(Mapping& m);
@@ -212,7 +214,8 @@ int main(int argc, char *argv[])
                   tcph.GetAckNum(p_ack_num);
                   if(p_ack_num == cs->state.GetLastSent()){
                     clearTimeout(*cs);
-                    cs->state.SetLastRecvd(p_seq_num);
+                    popRetransmitQueue(*cs, p_ack_num);
+                    cs->state.SetLastRecvd(cs->state.GetLastRecvd());
                     cs->state.SetLastAcked(p_ack_num-1);
                     cs->state.SetState(ESTABLISHED);
                     sendUp(cs->connection, WRITE);
@@ -252,7 +255,7 @@ int main(int argc, char *argv[])
                     Buffer data;
                     //get data from send_buffer
                     newp = makeFullPacket(*cs, new_flags, cs->state.GetLastRecvd()+1, cs->state.GetLastSent(), data);
-                    cs->state.SetLastSent(cs->state.GetLastSent()+data.GetSize()+1);
+                    cs->state.SetLastSent(cs->state.GetLastSent()+data.GetSize());
                     printPacket(newp);
                     //cs->retransmit_queue.push_back(newp);
                     MinetSend(mux, newp);
@@ -279,51 +282,60 @@ int main(int argc, char *argv[])
               
               cerr << "Connection in ESTABLISHED state" << endl;
 
+              Packet newp;
               unsigned char flags;
               unsigned int p_ack_num;
               unsigned int p_seq_num;
               unsigned short p_win_size;
               tcph.GetFlags(flags);
               unsigned char new_flags = 0;
-              Buffer data = p.GetPayload();
               tcph.GetSeqNum(p_seq_num);
               if(p_seq_num == cs->state.GetLastRecvd()+1){
                 if(IS_SYN(flags)){
                   cerr << "Error: Received SYN in connection state ESTABLISHED" << endl;
                 } else if(IS_ACK(flags)){
                   tcph.GetAckNum(p_ack_num);
-                  if(p_ack_num > cs->state.GetLastAcked()+1 && p_ack_num <= cs->state.GetLastSent()){
+                  if((p_ack_num > cs->state.GetLastAcked()+1 || (cs->retransmit_queue.size()==0 && p_ack_num > cs->state.GetLastAcked())) && p_ack_num <= cs->state.GetLastSent()){
                     cerr << "Valid ACK" << endl;
-                    Packet newp;
                     popRetransmitQueue(*cs, p_ack_num);
+                    clearTimeout(*cs);
                     cs->state.SetLastAcked(p_ack_num-1);
                     tcph.GetWinSize(p_win_size);
                     cs->state.SetSendRwnd(p_win_size);
                     //process data payload in packet
-                    
+                    Buffer data = p.GetPayload();
+                    size_t data_size = getDataLength(p);
+                    cerr << "Data size: " << data_size << endl;
+                    sendUp(cs->connection, WRITE, data); //send data to sock
+
                     Buffer return_data;
-                    cs->state.SetLastRecvd(p_seq_num+data.GetSize());
-                    if(data.GetSize()>0){
+                    cs->state.SetLastRecvd(cs->state.GetLastRecvd()+data_size);
+                    if(data_size>0){
                       SET_ACK(new_flags);
                       //send data to sock
                       //get some data from our send buffer
                     }
+                    return_data = cs->state.SendBuffer.ExtractFront(TCP_MAXIMUM_SEGMENT_SIZE);
+                    /*
                     if(IS_FIN(flags)){
                       SET_ACK(new_flags);
                       cs->state.SetState(CLOSE_WAIT);
                     }
+                    */
+
                     if(new_flags!=0 || return_data.GetSize()>0){
                       SET_ACK(new_flags); //whatever, don't question this, i dunno
                       newp=makeFullPacket(*cs, new_flags, cs->state.GetLastRecvd()+1, cs->state.GetLastSent(), return_data);
-                      cs->state.SetLastSent(cs->state.GetLastSent()+return_data.GetSize());
+                      cs->state.SetLastSent(cs->state.GetLastSent()+return_data.GetSize()+IS_FIN(flags));
                       printPacket(newp);
                       if(IS_FIN(flags) || return_data.GetSize()>0){
                         //start timer, we have data that got sent or a FIN sent
                         cs->retransmit_queue.push_back(newp);
                         startTimer(*cs);
-
                       }
+                      MinetSend(mux, newp);
                     }
+                    
                   } else if(p_ack_num > cs->state.GetLastSent()){
                     cerr << "Received ACK for unsent sequece number" << endl;
 
@@ -334,7 +346,7 @@ int main(int argc, char *argv[])
                   cerr << "Segment received with no ACK" << endl;
                 }
               } else {
-                cerr << "Invalid sequence number" << endl;
+                cerr << "Invalid sequence number, expecting: " << cs->state.GetLastRecvd()+1 << endl;
               }
             }
             break;
@@ -422,10 +434,19 @@ void handleSockRequest(SockRequestResponse& s) {
     }     
     case WRITE:
     {
-       Mapping& m = *clist.FindMatching(s.connection);
+       Mapping& m = *clist.FindExactMatching(s.connection);
        m.state.SendBuffer.AddBack(s.data);
+       Buffer return_data = m.state.SendBuffer.ExtractFront(TCP_MAXIMUM_SEGMENT_SIZE);
+       unsigned char new_flags;
+       SET_ACK(new_flags);
+       Packet newp=makeFullPacket(m, new_flags, m.state.GetLastRecvd()+1, m.state.GetLastSent(), return_data);
+       m.state.SetLastSent(m.state.GetLastSent()+return_data.GetSize()+1);
+       printPacket(newp);
+       m.retransmit_queue.push_back(newp);
+       startTimer(m);
+       MinetSend(mux, newp);
        sendUp(m.connection, STATUS);
-       setTimeout(m, 0);
+       //setTimeout(m, 0);
        break;
     }
     case FORWARD:
@@ -542,7 +563,25 @@ void printPacket(Packet& p) {
   Buffer& data = p.GetPayload();
   cerr << "App Data length = " << data_len << endl;
   cerr << "App Data = " << data.ExtractFront(data_len) << endl;
+  //cerr << "App Data length = " << data.GetSize() << endl;
+  //cerr << "App Data = " << data << endl;
   cerr << " ============== / PACKET ============== " << endl;
+}
+
+size_t getDataLength(Packet& p)
+{
+  IPHeader ipl=p.FindHeader(Headers::IPHeader);
+  TCPHeader tcph=p.FindHeader(Headers::TCPHeader);
+
+  unsigned short packet_len;
+  unsigned char ip_header_len;
+  unsigned char tcphlen;
+  ipl.GetTotalLength(packet_len);
+  ipl.GetHeaderLength(ip_header_len);
+  tcph.GetHeaderLen(tcphlen);
+  ip_header_len *= 4;
+  tcphlen *= 4;
+  return packet_len - (unsigned)ip_header_len - (unsigned)tcphlen;
 }
 
 void sendSyn(MinetHandle& h, Mapping& m)
