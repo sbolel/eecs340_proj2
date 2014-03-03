@@ -49,6 +49,35 @@ void popRetransmitQueue(Mapping& m, unsigned int ack_num);
 
 void startTimer(Mapping& m);
 
+
+int extractPayload(Mapping& m, Packet& p) {
+   Buffer& buf = p.GetPayload();
+
+   //char data[2000];
+   unsigned start = 0;
+   for(unsigned i = 0; i < buf.GetSize() && buf[i] == 0; ++i)
+      start = i+1;
+   
+   unsigned length = buf.GetSize() - start;
+   for(unsigned i = start+length; i > start && buf[i-1] == 0; --i)
+      length--;
+   
+   Buffer & data = buf.Extract(start, length); /////   [!] this is destructive, don't do this
+   m.state.RecvBuffer.AddFront(data);
+   
+   
+   cout << "Extracting " << length << " characters: " << data << endl;
+   //[!] send buffer upstairs ... somehow
+   if (length > 0)
+      sendUp(m.connection, WRITE, data); 
+   
+   m.state.SetLastRecvd(m.state.GetLastRecvd() + length); //there is an alt function that returns a bool if it successfully added the datat to the buffer
+   
+   return length;
+}
+
+
+
 int main(int argc, char *argv[])
 {
   srand( time(NULL) );
@@ -277,6 +306,37 @@ int main(int argc, char *argv[])
             case ESTABLISHED:
             {
               cerr << "Connection in ESTABLISHED state" << endl;
+              bool data_ok = (*cs).state.SetLastRecvd(seqnum,data_len); //check and set last_received
+              unsigned char flags;
+              tcph.GetFlags(flags);
+              unsigned int p_ack_num;
+              unsigned int p_seq_num;
+
+              if (IS_ACK(flags)) {
+                cs->state.SetLastAcked(p_ack_num); //accumulative ack, so anything before acknum should be acked already
+              }
+              if (IS_FIN(flags)) {
+                cs->state.SetLastRecvd(p_ack_num); //no more data
+                cs->state.SetState(CLOSE_WAIT); //change state into CLOSE_WAIT
+              } 
+              
+              unsigned char new_flags = 0;
+              SET_ACK(new_flags);
+              
+              Packet newp;
+              // HERE
+              // ======
+              // newp = makeFullPacket(*cs, new_flags, cs->state.GetLastRecvd()+1, cs->state.GetLastSent(), data);
+              // MinetSend(mux, newp);
+
+              SockRequestResponse repl;
+              //send packet to socket
+              repl.type = WRITE;
+              repl.connection = c;
+              repl.error = EOK;
+              // repl.bytes = data_len;
+              // repl.data = data;
+              // MinetSend(sock,repl);
             }
             break;
             case SEND_DATA:
